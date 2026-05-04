@@ -1,4 +1,8 @@
 import axios from 'axios';
+import { embedText, embedBatch } from './embeddingService.js';
+
+// Re-export so callers can import from one place
+export { embedText, embedBatch };
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 

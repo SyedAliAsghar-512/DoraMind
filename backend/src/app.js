@@ -9,11 +9,13 @@ import { WebSocketServer } from 'ws';
 
 import authRoutes     from './routes/auth.js';
 import chatRoutes     from './routes/chat.js';
-import documentRoutes from './routes/document.js';
 import aiRoutes       from './routes/ai.js';
 import modelRoutes    from './routes/models.js';
+import uploadRoutes   from './routes/uploadRoutes.js';
+import ragChatRoutes  from './routes/chatRoutes.js';
 import errorHandler   from './middleware/errorHandler.js';
-import { handleWebSocket } from './services/wsHandler.js';
+import { handleWebSocket }      from './services/wsHandler.js';
+import { startDocumentWorker, stopDocumentWorker } from './workers/documentWorker.js';
 
 const app = express();
 
@@ -69,19 +71,22 @@ app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
 // ── Routes ────────────────────────────────────────────────────
 app.use('/api/auth',    authRoutes);
-app.use('/api/chat',    chatRoutes);
-app.use('/api/docs',    documentRoutes);
+app.use('/api/chat',    chatRoutes);    // chat session CRUD
+app.use('/api/chat',    ragChatRoutes); // adds /:chatId/rag-stream (SSE)
+app.use('/api/docs',    uploadRoutes);  // document upload + management
 app.use('/api/ai',      aiRoutes);
 app.use('/api/models',  modelRoutes);
 
 // Health check (no auth required)
 app.get('/health', async (_, res) => {
-  const { checkOllamaHealth } = await import('./services/ollamaService.js');
-  const ollama = await checkOllamaHealth();
+  const { checkOllamaHealth }  = await import('./services/ollamaService.js');
+  const { checkChromaHealth }  = await import('./services/vectorDBService.js');
+  const [ollama, chroma] = await Promise.all([checkOllamaHealth(), checkChromaHealth()]);
   res.json({
     status: 'ok',
-    ts: new Date().toISOString(),
+    ts:     new Date().toISOString(),
     ollama: ollama.healthy ? 'up' : 'down',
+    chroma: chroma ? 'up' : 'down',
   });
 });
 
@@ -114,6 +119,10 @@ mongoose.connect(MONGO_URI, {
   maxPoolSize: 10,
 }).then(() => {
   console.log('✅  MongoDB connected');
+
+  // Start background document processing worker
+  startDocumentWorker();
+
   const PORT = process.env.PORT || 5000;
   httpServer.listen(PORT, () => {
     console.log(`🚀  DoraMind API running on port ${PORT}`);
@@ -127,6 +136,7 @@ mongoose.connect(MONGO_URI, {
 // ── Graceful shutdown ─────────────────────────────────────────
 const shutdown = async (signal) => {
   console.log(`\n⏳  ${signal} received, shutting down…`);
+  await stopDocumentWorker();
   await mongoose.disconnect();
   httpServer.close(() => {
     console.log('✅  Server closed');

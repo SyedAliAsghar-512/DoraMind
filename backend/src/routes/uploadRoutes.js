@@ -2,7 +2,6 @@ import { Router } from 'express';
 import multer from 'multer';
 import auth from '../middleware/auth.js';
 import asyncCatch from '../utils/asyncCatchErrors.js';
-
 import {
   getDocuments,
   uploadDocument,
@@ -16,7 +15,6 @@ const upload = multer({
 });
 
 const router = Router();
-
 router.use(auth);
 
 router.get('/',                      asyncCatch(getDocuments));

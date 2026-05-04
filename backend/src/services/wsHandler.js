@@ -5,6 +5,8 @@ import { Document } from '../models/Document.js';
 import { selectModel }            from './modelRouter.js';
 import { buildPrompt }            from './promptBuilder.js';
 import { streamOllamaChat }       from './ollamaService.js';
+import { embedText }              from './embeddingService.js';
+import { searchSimilarChunks }    from './vectorDBService.js';
 import { extractAndUpdateMemory } from './memoryService.js';
 
 const PING_INTERVAL_MS = 25_000;
@@ -89,49 +91,63 @@ async function handleChatMessage(ws, userId, msg, setAbortController) {
   let memory = null;
   try { memory = await Memory.findOrCreate(userId); } catch {}
 
-  // ── 3. Load & prepare document context (THE CRITICAL FIX) ─
-  let ragChunks  = [];   // { filename, text }[]
-  let imageData  = [];   // { base64, mediaType, filename }[]
+  // ── 3. Load & prepare document context ───────────────────────
+  let ragChunks  = [];
+  let imageData  = [];
   let hasImages  = false;
 
   if (chat.documentIds?.length > 0) {
+    // ── 3a. Semantic vector search (primary) ─────────────────
+    let vectorSearchDone = false;
     try {
-      // Fetch FULL documents including chunks and imageBase64
-      const docs = await Document.find({
-        _id: { $in: chat.documentIds },
-        userId,
-      }).select('filename mimeType fileChunks imageBase64 imageMediaType isImage processed');
+      const queryVec = await embedText(content);
+      const { texts, metadatas } = await searchSimilarChunks(
+        userId.toString(),
+        queryVec,
+        MAX_RAG_CHUNKS
+      );
 
-      for (const doc of docs) {
-        if (doc.isImage && doc.imageBase64) {
-          // Vision: collect image data to pass directly to Ollama
-          imageData.push({
-            base64:    doc.imageBase64,
-            mediaType: doc.imageMediaType || 'image/jpeg',
-            filename:  doc.filename,
-          });
-          hasImages = true;
-
-        } else if (doc.fileChunks?.length > 0) {
-          // RAG: score chunks by relevance to the user's query
-          const scored = scoreChunks(doc.fileChunks, content);
-          const topChunks = scored
-            .slice(0, MAX_RAG_CHUNKS)
-            .map(c => ({ filename: doc.filename, text: c.text }));
-          ragChunks.push(...topChunks);
+      if (texts.length > 0) {
+        let totalChars = 0;
+        for (let i = 0; i < texts.length; i++) {
+          if (totalChars >= MAX_RAG_CHARS) break;
+          ragChunks.push({ filename: metadatas[i]?.filename || 'document', text: texts[i] });
+          totalChars += texts[i].length;
         }
+        vectorSearchDone = true;
       }
-
-      // Hard cap on total RAG text injected
-      let totalChars = 0;
-      ragChunks = ragChunks.filter(c => {
-        if (totalChars >= MAX_RAG_CHARS) return false;
-        totalChars += c.text.length;
-        return true;
-      });
-
     } catch (err) {
-      console.error('[WS] Failed to load documents:', err.message);
+      console.error('[WS] Vector search failed, falling back to keyword:', err.message);
+    }
+
+    // ── 3b. Keyword fallback + image loading ─────────────────
+    if (!vectorSearchDone) {
+      try {
+        const docs = await Document.find({
+          _id: { $in: chat.documentIds },
+          userId,
+        }).select('filename mimeType fileChunks isImage processed');
+
+        for (const doc of docs) {
+          if (doc.fileChunks?.length > 0) {
+            const scored = scoreChunks(doc.fileChunks, content);
+            const topChunks = scored
+              .slice(0, MAX_RAG_CHUNKS)
+              .map(c => ({ filename: doc.filename, text: c.text }));
+            ragChunks.push(...topChunks);
+          }
+        }
+
+        // Hard cap on total RAG text
+        let totalChars = 0;
+        ragChunks = ragChunks.filter(c => {
+          if (totalChars >= MAX_RAG_CHARS) return false;
+          totalChars += c.text.length;
+          return true;
+        });
+      } catch (err) {
+        console.error('[WS] Failed to load documents:', err.message);
+      }
     }
   }
 
