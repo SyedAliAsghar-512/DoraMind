@@ -81,17 +81,9 @@ const handleFileChange = async (e) => {
   try {
     const res = await api.post('/docs/upload', formData);
 
-    const docs = res.data.documents;
+    const doc = res.data.document;
 
-    setAttachments(prev => [
-      ...prev,
-      ...docs.map(doc => ({
-        ...doc,
-        _previewUrl: file.type.startsWith('image/')
-          ? URL.createObjectURL(file)
-          : null
-      }))
-    ]);
+    setAttachments(prev => [...prev, doc]);
 
   } catch (err) {
     alert('Upload failed');
